@@ -60,11 +60,21 @@ struct RecordingState {
   char filename[32];
 };
 
+// Define event data structure
+struct EventData {
+  char eventType[10];  // "buraco" or "lomba"
+  double latitude;
+  double longitude;
+  unsigned long timestamp;
+  bool processed;  // Flag to track if event was written to CSV
+};
+
 // Global variables
 QueueHandle_t gpsQueue;
 QueueHandle_t imuQueue;
 QueueHandle_t lidarQueue;
 QueueHandle_t recordingQueue; // Global queue for recording state
+QueueHandle_t eventQueue;
 SemaphoreHandle_t i2cSemaphore = NULL; // Protects I2C bus access
 bool lidarActive = false; // Add this with your other global variables
 
@@ -94,8 +104,9 @@ void TCP_SERVER_TASK(void *pvParameters);
 void setup() {
   gpsQueue = xQueueCreate(1, sizeof(GpsData));
   imuQueue = xQueueCreate(1, sizeof(ImuData));
-  lidarQueue = xQueueCreate(1, sizeof(LidarData));  // Nova queue para LIDAR
-  recordingQueue = xQueueCreate(1, sizeof(RecordingState)); // Nova queue para recording state
+  lidarQueue = xQueueCreate(1, sizeof(LidarData));
+  recordingQueue = xQueueCreate(1, sizeof(RecordingState));
+  eventQueue = xQueueCreate(5, sizeof(EventData));  // Store up to 5 events
   i2cSemaphore = xSemaphoreCreateMutex();
 
   // Initialize Serial for debugging
@@ -351,6 +362,7 @@ void SD_CARD(void *pvParameters) {
   
   // Task loop
   while (true) {
+    EventData eventData;
     // Check for recording state changes
     if (xQueuePeek(recordingQueue, &recordingState, 0) == pdTRUE) {
       // If new command received
@@ -371,7 +383,7 @@ void SD_CARD(void *pvParameters) {
           
           // Write headers
           if (dataFile) {
-            dataFile.println("timestamp,gps_valid,latitude,longitude,satellites,altitude,speed,accel_x,accel_y,accel_z,gyro_x,gyro_y,gyro_z,lidar_distance,lidar_strength");
+            dataFile.println("timestamp,gps_valid,latitude,longitude,satellites,altitude,speed,accel_x,accel_y,accel_z,gyro_x,gyro_y,gyro_z,lidar_distance,lidar_strength,event");
             dataFile.flush();
             Serial.println("New recording file created: " + String(recordingState.filename));
           } else {
@@ -389,7 +401,7 @@ void SD_CARD(void *pvParameters) {
     }
     
     // If recording, write data periodically
-    if (recordingState.isRecording && dataFile) {  // 10Hz recording
+    if (recordingState.isRecording && dataFile) {
       lastWrite = millis();
       
       // Get latest sensor data
@@ -401,7 +413,7 @@ void SD_CARD(void *pvParameters) {
       bool imuActive = xQueuePeek(imuQueue, &imuData, 0) == pdTRUE;
       bool lidarActive = xQueuePeek(lidarQueue, &lidarData, 0) == pdTRUE;
       
-      // Format CSV line using sprintf
+      // Format CSV line using snprintf
       int dataLen = snprintf(dataLine, sizeof(dataLine), "%lu,", millis());
 
       // GPS data
@@ -430,6 +442,28 @@ void SD_CARD(void *pvParameters) {
       } else {
         dataLen += snprintf(lidarDataStr, sizeof(lidarDataStr), "0,0");
       }
+
+      // Add event data if available
+      char eventStr[16] = "";
+      
+      
+      // Check for unprocessed events
+      if (xQueuePeek(eventQueue, &eventData, 0) == pdTRUE && !eventData.processed) {
+        // If event timestamp is close to current time, include it
+        if (abs((long)(millis() - eventData.timestamp)) < 500) {
+          strncpy(eventStr, eventData.eventType, sizeof(eventStr) - 1);
+          eventStr[sizeof(eventStr) - 1] = '\0';
+          
+          // Mark as processed and update queue
+          eventData.processed = true;
+          xQueueOverwrite(eventQueue, &eventData);
+        }
+      }
+      
+      // Add event column to CSV line
+      dataLen += snprintf(dataLine + strlen(dataLine), 
+                          sizeof(dataLine) - strlen(dataLine), 
+                          ",%s", eventStr);
 
       // Check if the formatted data fits into the buffer
       if (dataLen < sizeof(dataLine) - 1) {
@@ -539,7 +573,7 @@ void TCP_SERVER_TASK(void *pvParameters) {
   // Network configuration
   const char* ssid = "AP_ESP32";
   const char* password = "MCE_ROD_2025";
-  
+  EventData eventData;
   // Static IP Configuration
   IPAddress local_IP(192,168,20,55);
   IPAddress gateway(192,168,20,1);
@@ -568,6 +602,7 @@ void TCP_SERVER_TASK(void *pvParameters) {
   
   // Task loop
   while (true) {
+    volatile int event = 0;
     // Accept new client if needed
     if (!client || !client.connected()) {
       client = server.available();
@@ -599,6 +634,31 @@ void TCP_SERVER_TASK(void *pvParameters) {
         stateChanged = true;
         Serial.println("Recording stopped");
       }
+      else if (command == "buraco" || command == "lomba") {
+        // Create event record
+        EventData eventData;
+        strncpy(eventData.eventType, command.c_str(), sizeof(eventData.eventType) - 1);
+        eventData.eventType[sizeof(eventData.eventType) - 1] = '\0';  // Ensure null termination
+        eventData.timestamp = millis();
+        eventData.processed = false;
+        
+        // Get current GPS coordinates
+        GpsData gpsData;
+        if (xQueuePeek(gpsQueue, &gpsData, 0) == pdTRUE) {
+          eventData.latitude = gpsData.latitude;
+          eventData.longitude = gpsData.longitude;
+        } else {
+          eventData.latitude = 0.0;
+          eventData.longitude = 0.0;
+        }
+        
+        // Send to queue
+        xQueueSend(eventQueue, &eventData, 0);
+        
+        // Acknowledge
+        event = 1;
+
+      }
       
       // Update queue if a state change occurred
       if (stateChanged) {
@@ -613,6 +673,13 @@ void TCP_SERVER_TASK(void *pvParameters) {
       if (recordingState.isRecording) {
         jsonDoc["filename"] = recordingState.filename;
         jsonDoc["elapsed"] = (millis() - recordingState.startTime) / 1000;
+      }
+      if (event) {
+          jsonDoc["status"] = "event_recorded";
+          jsonDoc["event"] = eventData.eventType;
+          jsonDoc["lat"] = eventData.latitude;
+          jsonDoc["lng"] = eventData.longitude;
+          event = 0;
       }
       
       String jsonString;
