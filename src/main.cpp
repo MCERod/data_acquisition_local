@@ -62,11 +62,12 @@ struct RecordingState {
 
 // Define event data structure
 struct EventData {
-  char eventType[10];  // "buraco" or "lomba"
+  int eventCode;           // 0=none, 1=hole, 2=speed bump
+  char eventType[10];      // Keep text for readability in logs
   double latitude;
   double longitude;
   unsigned long timestamp;
-  bool processed;  // Flag to track if event was written to CSV
+  bool processed;
 };
 
 // Global variables
@@ -106,7 +107,7 @@ void setup() {
   imuQueue = xQueueCreate(1, sizeof(ImuData));
   lidarQueue = xQueueCreate(1, sizeof(LidarData));
   recordingQueue = xQueueCreate(1, sizeof(RecordingState));
-  eventQueue = xQueueCreate(5, sizeof(EventData));  // Store up to 5 events
+  eventQueue = xQueueCreate(1, sizeof(EventData));  // Store only most recent event
   i2cSemaphore = xSemaphoreCreateMutex();
 
   // Initialize Serial for debugging
@@ -117,7 +118,7 @@ void setup() {
   xTaskCreate(IMU_TASK, "IMU_TASK", 4096, NULL, 3, NULL); // Double the stack size
   xTaskCreate(LIDAR_TASK, "LIDAR_TASK", 2048, NULL, 3, NULL);  // Nova task
   xTaskCreate(SD_CARD, "SD_CARD", 8192, NULL, 2, NULL);
-  xTaskCreate(TCP_SERVER_TASK, "TCP_SERVER_TASK", 4096, NULL, 1, NULL); // Nova task
+  xTaskCreate(TCP_SERVER_TASK, "TCP_SERVER_TASK", 8192, NULL, 1, NULL); // Nova task
 }
 
 void loop() {
@@ -376,7 +377,7 @@ void SD_CARD(void *pvParameters) {
           // Close any existing file
           if (dataFile) {
             dataFile.close();
-          }
+          } 
           
           // Open new file
           dataFile = SD.open(recordingState.filename, FILE_WRITE);
@@ -413,7 +414,7 @@ void SD_CARD(void *pvParameters) {
       bool imuActive = xQueuePeek(imuQueue, &imuData, 0) == pdTRUE;
       bool lidarActive = xQueuePeek(lidarQueue, &lidarData, 0) == pdTRUE;
       
-      // Format CSV line using snprintf
+      // Format CSV line - timestamp only
       int dataLen = snprintf(dataLine, sizeof(dataLine), "%lu,", millis());
 
       // GPS data
@@ -445,34 +446,30 @@ void SD_CARD(void *pvParameters) {
 
       // Add event data if available
       char eventStr[16] = "";
-      
-      
+      int eventCode = 0;
+
       // Check for unprocessed events
       if (xQueuePeek(eventQueue, &eventData, 0) == pdTRUE && !eventData.processed) {
-        // If event timestamp is close to current time, include it
-        if (abs((long)(millis() - eventData.timestamp)) < 500) {
-          strncpy(eventStr, eventData.eventType, sizeof(eventStr) - 1);
-          eventStr[sizeof(eventStr) - 1] = '\0';
-          
-          // Mark as processed and update queue
-          eventData.processed = true;
-          xQueueOverwrite(eventQueue, &eventData);
-        }
+        // Process event as before
+        strncpy(eventStr, eventData.eventType, sizeof(eventStr) - 1);
+        eventStr[sizeof(eventStr) - 1] = '\0';
+        eventCode = eventData.eventCode;
+        
+        // Mark as processed
+        eventData.processed = true;
+        xQueueOverwrite(eventQueue, &eventData);
       }
-      
-      // Add event column to CSV line
-      dataLen += snprintf(dataLine + strlen(dataLine), 
-                          sizeof(dataLine) - strlen(dataLine), 
-                          ",%s", eventStr);
 
-      // Check if the formatted data fits into the buffer
+      // Concatenate sensor data first (in correct order)
       if (dataLen < sizeof(dataLine) - 1) {
-        // Concatenate the formatted strings
         strcat(dataLine, gpsDataStr);
         strcat(dataLine, imuDataStr);
         strcat(dataLine, lidarDataStr);
-
-        // Write data
+        
+        // NOW add event data at the end where it belongs
+        int eventPos = strlen(dataLine);
+        snprintf(dataLine + eventPos, sizeof(dataLine) - eventPos, ",%s,%d", eventStr, eventCode);
+        
         dataFile.println(dataLine);
       } else {
         Serial.println("Data line too long!");
@@ -573,7 +570,6 @@ void TCP_SERVER_TASK(void *pvParameters) {
   // Network configuration
   const char* ssid = "AP_ESP32";
   const char* password = "MCE_ROD_2025";
-  EventData eventData;
   // Static IP Configuration
   IPAddress local_IP(192,168,20,55);
   IPAddress gateway(192,168,20,1);
@@ -582,7 +578,7 @@ void TCP_SERVER_TASK(void *pvParameters) {
   // TCP Server and Client
   WiFiServer server(1000);
   WiFiClient client;
-  
+  EventData eventData = {};
   // Local recording state initialization
   RecordingState recordingState = {false, false, 0, 0, ""};
   
@@ -636,11 +632,14 @@ void TCP_SERVER_TASK(void *pvParameters) {
       }
       else if (command == "buraco" || command == "lomba") {
         // Create event record
-        EventData eventData;
+
         strncpy(eventData.eventType, command.c_str(), sizeof(eventData.eventType) - 1);
-        eventData.eventType[sizeof(eventData.eventType) - 1] = '\0';  // Ensure null termination
+        eventData.eventType[sizeof(eventData.eventType) - 1] = '\0';
         eventData.timestamp = millis();
         eventData.processed = false;
+        
+        // Map event type to code
+        eventData.eventCode = (command == "buraco") ? 1 : 2;
         
         // Get current GPS coordinates
         GpsData gpsData;
@@ -653,7 +652,7 @@ void TCP_SERVER_TASK(void *pvParameters) {
         }
         
         // Send to queue
-        xQueueSend(eventQueue, &eventData, 0);
+        xQueueOverwrite(eventQueue, &eventData);
         
         // Acknowledge
         event = 1;
@@ -666,7 +665,7 @@ void TCP_SERVER_TASK(void *pvParameters) {
       }
       
       // Prepare acknowledgment JSON
-      StaticJsonDocument<200> jsonDoc;
+      StaticJsonDocument<512> jsonDoc;
       jsonDoc["status"] = recordingState.isRecording ? 1 : 0;
       jsonDoc["command"] = command;
       jsonDoc["result"] = stateChanged ? "success" : "no change";
@@ -677,6 +676,7 @@ void TCP_SERVER_TASK(void *pvParameters) {
       if (event) {
           jsonDoc["status"] = "event_recorded";
           jsonDoc["event"] = eventData.eventType;
+          jsonDoc["event_code"] = eventData.eventCode;  // Add numeric code
           jsonDoc["lat"] = eventData.latitude;
           jsonDoc["lng"] = eventData.longitude;
           event = 0;
