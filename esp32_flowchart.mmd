@@ -1,0 +1,142 @@
+flowchart TD
+    A["🚀 SYSTEM START"] --> B["⚙️ Initialize Serial & I2C"]
+    B --> C["🔍 Scan I2C Bus"]
+    C --> D["📦 Create Queues & Semaphores"]
+    D --> E["🔄 Create FreeRTOS Tasks"]
+    E --> F["❌ Delete Main Loop Task"]
+    
+    %% Task Creation - Simplified with more spacing
+    E --> G1["📍 GPS TASK<br/>Priority: 2"]
+    E --> G2["📊 IMU TASK<br/>Priority: 3"] 
+    E --> G3["📏 LIDAR TASK<br/>Priority: 3"]
+    E --> G4["💾 SD CARD TASK<br/>Priority: 2"]
+    E --> G5["🌐 TCP SERVER<br/>Priority: 1"]
+    
+    %% Add spacing between task flows
+    G1 -.-> SPACE1[" "]
+    G2 -.-> SPACE2[" "]
+    G3 -.-> SPACE3[" "]
+    G4 -.-> SPACE4[" "]
+    G5 -.-> SPACE5[" "]
+    
+    %% GPS Task Flow - Simplified with spacing
+    SPACE1 -.-> GPS1["📡 Init GPS Serial"]
+    GPS1 --> GPS2{"📶 Data Available?"}
+    GPS2 -->|YES| GPS3["✅ Parse & Update"]
+    GPS2 -->|NO| GPS4["⚠️ Check Connection"]
+    GPS3 --> GPS5["📤 Send to Queue"]
+    GPS4 --> GPS5
+    GPS5 --> GPS6["⏱️ Delay 100ms"]
+    GPS6 --> GPS2
+    
+    %% IMU Task Flow - Simplified with spacing
+    SPACE2 -.-> IMU1["🔧 Init MPU6050"]
+    IMU1 --> IMU2{"🎯 Connected?"}
+    IMU2 -->|YES| IMU3["⚙️ Configure & Calibrate"]
+    IMU2 -->|NO| IMU4["❌ Print Error"]
+    IMU3 --> IMU5["📈 Read Motion Data"]
+    IMU4 --> IMU5
+    IMU5 --> IMU6["🔄 Apply Filters"]
+    IMU6 --> IMU7["📤 Send to Queue"]
+    IMU7 --> IMU8["⏱️ Delay 10ms"]
+    IMU8 --> IMU5
+    
+    %% LIDAR Task Flow - Simplified with spacing
+    SPACE3 -.-> LDR1["🔧 Init LIDAR07"]
+    LDR1 --> LDR2{"🎯 Connected?"}
+    LDR2 -->|YES| LDR3["⚙️ Configure Mode"]
+    LDR2 -->|NO| LDR4["🔄 Retry Init"]
+    LDR3 --> LDR5["📏 Read Distance"]
+    LDR4 --> LDR2
+    LDR5 --> LDR6{"💪 Signal > 80?"}
+    LDR6 -->|YES| LDR7["📤 Send to Queue"]
+    LDR6 -->|NO| LDR8["⏱️ Delay 100ms"]
+    LDR7 --> LDR8
+    LDR8 --> LDR5
+    
+    %% SD Card Task Flow - Simplified with spacing
+    SPACE4 -.-> SD1["💾 Init SD Card"]
+    SD1 --> SD2{"📁 SD Ready?"}
+    SD2 -->|YES| SD3["🔄 Main Loop"]
+    SD2 -->|NO| SD4["🔄 Retry Init"]
+    SD3 --> SD5{"🎬 Recording?"}
+    SD4 --> SD2
+    SD5 -->|START| SD6["📝 Create File"]
+    SD5 -->|STOP| SD7["💾 Close File"]
+    SD5 -->|ACTIVE| SD8["📊 Read Sensors"]
+    SD6 --> SD9["📋 Write Header"]
+    SD7 --> SD3
+    SD8 --> SD10["💾 Write CSV"]
+    SD9 --> SD3
+    SD10 --> SD11["🔄 Flush Check"]
+    SD11 --> SD3
+    
+    %% TCP Server Task Flow - Simplified with spacing
+    SPACE5 -.-> TCP1["📶 Setup WiFi AP"]
+    TCP1 --> TCP2["🌐 Start TCP Server"]
+    TCP2 --> TCP3["🔄 Main Loop"]
+    TCP3 --> TCP4{"👤 Client Connected?"}
+    TCP4 -->|YES| TCP5{"📨 Command?"}
+    TCP4 -->|NO| TCP6["⏳ Wait Client"]
+    TCP5 -->|START| TCP7["🎬 Start Recording"]
+    TCP5 -->|STOP| TCP8["⏹️ Stop Recording"]
+    TCP5 -->|EVENT| TCP9["📍 Log Event"]
+    TCP5 -->|NONE| TCP10["📊 Send Status"]
+    TCP6 --> TCP3
+    TCP7 --> TCP11["📤 Send Response"]
+    TCP8 --> TCP11
+    TCP9 --> TCP11
+    TCP10 --> TCP12["⏱️ Delay 100ms"]
+    TCP11 --> TCP3
+    TCP12 --> TCP3
+    
+    %% Position legend on the right side
+    F -.-> RightLegend
+    
+    %% Right side Legend
+    subgraph RightLegend ["📋 LEGEND & SPECS"]
+        direction TB
+        
+        subgraph Legend ["📋 LEGEND"]
+            direction TB
+            L1["🚀 System Start"] 
+            L2["📍 FreeRTOS Task"]
+            L3["🔄 Process/Action"]
+            L4["🔶 Decision Point"]
+            L5["📤 Queue Operation"]
+        end
+        
+        subgraph TechInfo ["⚙️ TECHNICAL INFO"]
+            direction TB
+            T1["📊 SAMPLING RATES<br/>• GPS: 1Hz every 1000ms<br/>• IMU: 100Hz every 10ms<br/>• LIDAR: 10Hz every 100ms"]
+            T2["🔗 COMMUNICATION<br/>• I2C: MPU6050 + LIDAR07<br/>• UART: GPS Module<br/>• WiFi: TCP Server"]
+            T3["📁 DATA FORMAT<br/>• CSV with timestamps<br/>• Combined sensor data<br/>• Event logging support"]
+            T4["🌐 NETWORK CONFIG<br/>• AP: 192.168.20.55<br/>• Port: 1000<br/>• Commands: START/STOP/Events"]
+        end
+    end
+    
+    %% Improved Style definitions with much larger fonts
+    classDef startClass fill:#ff9999,stroke:#cc0000,stroke-width:4px,font-size:18px,font-weight:bold
+    classDef taskClass fill:#99ccff,stroke:#0066cc,stroke-width:4px,font-size:16px,font-weight:bold
+    classDef actionClass fill:#99ff99,stroke:#00cc00,stroke-width:3px,font-size:14px,font-weight:bold
+    classDef decisionClass fill:#ffcc99,stroke:#ff6600,stroke-width:3px,font-size:14px,font-weight:bold
+    classDef queueClass fill:#cc99ff,stroke:#6600cc,stroke-width:3px,font-size:14px,font-weight:bold
+    classDef legendClass fill:#f0f0f0,stroke:#333333,stroke-width:2px,font-size:13px,font-weight:bold
+    classDef techClass fill:#e6f3ff,stroke:#0066cc,stroke-width:2px,font-size:12px,font-weight:bold
+    classDef invisibleClass fill:transparent,stroke:transparent
+    
+    %% Apply styles to make text more visible
+    class A startClass
+    class G1,G2,G3,G4,G5 taskClass
+    class GPS5,IMU7,LDR7,SD10,TCP11 queueClass
+    class B,C,D,E,F actionClass
+    class GPS2,IMU2,LDR2,LDR6,SD2,SD5,TCP4,TCP5 decisionClass
+    class SPACE1,SPACE2,SPACE3,SPACE4,SPACE5 invisibleClass
+    
+    %% Legend styles
+    class L1 startClass
+    class L2 taskClass
+    class L3 actionClass
+    class L4 decisionClass
+    class L5 queueClass
+    class T1,T2,T3,T4 techClass

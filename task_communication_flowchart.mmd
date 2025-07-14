@@ -1,0 +1,58 @@
+flowchart TD
+    %% FreeRTOS System - Style matching reference image
+    
+    %% Tasks (rectangular boxes)
+    GPS["GPS TASK"]
+    IMU["IMU TASK"] 
+    LIDAR["LASER SENSOR<br/>TASK"]
+    TCP["TCP SERVER<br/>TASK"]
+    SD["SD CARD TASK"]
+    
+    %% Semaphore representations (small squares with full identifiers)
+    SEM1["I2C<br/>Semaphore"]
+    
+    %% Documentation boxes with better centering
+    subgraph Documentation [" "]
+        direction TB
+        subgraph LegendRow [" "]
+            direction LR
+            SPACER1[" "]:::invisible
+            L1["Legend:<br/>□→□ Queue<br/>□⋯□ Semaphore<br/>□ Task"]:::compact_legend
+            SPACER2[" "]:::invisible
+        end
+        subgraph SignalsRow [" "]
+            direction LR
+            SPACER3[" "]:::invisible
+            S1["Signals:<br/>I2C Semaphore: Protects I2C bus<br/>gpsQueue: GPS data<br/>imuQueue: IMU data<br/>lidarQueue: LIDAR data<br/>recordingQueue: Recording control<br/>eventQueue: Event markers"]:::signals_text
+            SPACER4[" "]:::invisible
+        end
+    end
+    
+    %% Communication flows with queue labels
+    GPS -->|gpsQueue| SD
+    GPS -->|gpsQueue| TCP
+    IMU -->|imuQueue| SD
+    LIDAR -->|lidarQueue| SD
+    TCP -->|recordingQueue| SD
+    TCP -->|eventQueue| SD
+    
+    %% I2C Semaphore protection (dotted lines)
+    SEM1 -.-> IMU
+    SEM1 -.-> LIDAR
+    
+    %% Styling to match clean professional look
+    classDef taskBox fill:#ffffff,stroke:#000000,stroke-width:2px,color:#000000,font-size:12px,font-family:Arial
+    classDef semBox fill:#ffffff,stroke:#000000,stroke-width:1px,font-size:8px,font-weight:bold,font-family:Arial
+    classDef legendBox fill:#ffffff,stroke:#000000,stroke-width:0.5px,font-size:8px,padding:3px,margin:0px
+    classDef compact_legend fill:#ffffff,stroke:#ffffff,stroke-width:0px,font-size:12px,font-family:monospace
+    classDef signalsBox fill:#ffffff,stroke:#000000,stroke-width:0.5px,font-size:8px,padding:3px,margin:0px
+    classDef signals_text fill:#ffffff,stroke:#ffffff,stroke-width:0px,font-size:8px,font-family:Arial
+    classDef docBox fill:transparent,stroke:transparent,color:transparent
+    classDef invisible fill:transparent,stroke:transparent,color:transparent
+    
+    %% Apply styles
+    class GPS,IMU,LIDAR,TCP,SD taskBox
+    class SEM1 semBox
+    class Documentation,LegendRow,SignalsRow docBox
+    class SPACER1,SPACER2,SPACER3,SPACER4 invisible
+

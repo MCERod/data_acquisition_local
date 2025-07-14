@@ -19,6 +19,9 @@
   #include <MPU6050_6Axis_MotionApps20.h>
 #endif
 
+
+
+
 // Define this at the top of your file after includes
 struct GpsData {
   bool isValid;
@@ -60,11 +63,22 @@ struct RecordingState {
   char filename[32];
 };
 
+// Define event data structure
+struct EventData {
+  int eventCode;           // 0=none, 1=hole, 2=speed bump
+  char eventType[10];      // Keep text for readability in logs
+  double latitude;
+  double longitude;
+  unsigned long timestamp;
+  bool processed;
+};
+
 // Global variables
 QueueHandle_t gpsQueue;
 QueueHandle_t imuQueue;
 QueueHandle_t lidarQueue;
 QueueHandle_t recordingQueue; // Global queue for recording state
+QueueHandle_t eventQueue;
 SemaphoreHandle_t i2cSemaphore = NULL; // Protects I2C bus access
 bool lidarActive = false; // Add this with your other global variables
 
@@ -84,29 +98,43 @@ bool lidarActive = false; // Add this with your other global variables
   uint16_t fifoCount;     // Count of all bytes in FIFO
 #endif
 
+// Add this with your other function declarations
+void scanI2C();
 void GPS_TASK(void *pvParameters);
 void IMU_TASK(void *pvParameters);
 void SD_CARD(void *pvParameters);
-void LIDAR_TASK(void *pvParameters);  // Adicione junto com outras declarações
+void LIDAR_TASK(void *pvParameters);
 void TCP_SERVER_TASK(void *pvParameters);
 
 
 void setup() {
-  gpsQueue = xQueueCreate(1, sizeof(GpsData));
-  imuQueue = xQueueCreate(1, sizeof(ImuData));
-  lidarQueue = xQueueCreate(1, sizeof(LidarData));  // Nova queue para LIDAR
-  recordingQueue = xQueueCreate(1, sizeof(RecordingState)); // Nova queue para recording state
-  i2cSemaphore = xSemaphoreCreateMutex();
-
   // Initialize Serial for debugging
   Serial.begin(115200);
+  delay(1000);
+  
+  // Initialize I2C bus ONCE here
+  Wire.begin(21, 22); // SDA=21, SCL=22 for ESP32
+  Wire.setClock(100000); // Start with standard 100kHz for compatibility
+  
+  Serial.println("I2C bus initialized");
+  
+  // Create queues and semaphores
+  gpsQueue = xQueueCreate(1, sizeof(GpsData));
+  imuQueue = xQueueCreate(1, sizeof(ImuData));
+  lidarQueue = xQueueCreate(1, sizeof(LidarData));
+  recordingQueue = xQueueCreate(1, sizeof(RecordingState));
+  eventQueue = xQueueCreate(1, sizeof(EventData));
+  i2cSemaphore = xSemaphoreCreateMutex();
+
+  // Optional: Scan I2C bus to see what devices are connected
+  scanI2C();
 
   // Create tasks
   xTaskCreate(GPS_TASK, "GPS_TASK", 2048, NULL, 2, NULL);
-  xTaskCreate(IMU_TASK, "IMU_TASK", 4096, NULL, 3, NULL); // Double the stack size
-  xTaskCreate(LIDAR_TASK, "LIDAR_TASK", 2048, NULL, 3, NULL);  // Nova task
+  xTaskCreate(IMU_TASK, "IMU_TASK", 4096, NULL, 3, NULL);
+  xTaskCreate(LIDAR_TASK, "LIDAR_TASK", 2048, NULL, 3, NULL);
   xTaskCreate(SD_CARD, "SD_CARD", 8192, NULL, 2, NULL);
-  xTaskCreate(TCP_SERVER_TASK, "TCP_SERVER_TASK", 4096, NULL, 1, NULL); // Nova task
+  xTaskCreate(TCP_SERVER_TASK, "TCP_SERVER_TASK", 8192, NULL, 1, NULL);
 }
 
 void loop() {
@@ -232,14 +260,10 @@ void IMU_TASK(void *pvParameters) {
   // Wait for a moment to ensure the I2C bus is ready
   vTaskDelay(100 / portTICK_PERIOD_MS);
   
-  // Initialize MPU6050 (your existing code)
   if (xSemaphoreTake(i2cSemaphore, portMAX_DELAY) == pdTRUE) {
-    // Your existing initialization code...
-    // Initialize MPU6050
-    Wire.begin();
+    // DON'T call Wire.begin() here - it's already initialized
     mpu.initialize();
     
-    // Verify connection
     if (!mpu.testConnection()) {
       Serial.println("MPU6050 connection failed");
     } else {
@@ -247,18 +271,17 @@ void IMU_TASK(void *pvParameters) {
     }
     
     // Configure MPU6050 settings
-    mpu.setFullScaleAccelRange(MPU6050_ACCEL_FS_2);  // Set accelerometer range to ±2g
-    mpu.setFullScaleGyroRange(MPU6050_GYRO_FS_250);  // Set gyro range to ±250°/s
-    mpu.setDLPFMode(MPU6050_DLPF_BW_20);            // Set low pass filter
+    mpu.setFullScaleAccelRange(MPU6050_ACCEL_FS_2);
+    mpu.setFullScaleGyroRange(MPU6050_GYRO_FS_250);
+    mpu.setDLPFMode(MPU6050_DLPF_BW_20);
     
     // Calibrate sensors
     Serial.println("Calibrating sensors...");
-    mpu.CalibrateGyro(7);   // Calibrate gyro with 7 loops
-    mpu.CalibrateAccel(7);  // Calibrate accel with 7 loops
+    mpu.CalibrateGyro(7);
+    mpu.CalibrateAccel(7);
     mpu.PrintActiveOffsets();
     
     Serial.println("MPU6050 ready!");
-    
     xSemaphoreGive(i2cSemaphore);
   }
   
@@ -351,6 +374,7 @@ void SD_CARD(void *pvParameters) {
   
   // Task loop
   while (true) {
+    EventData eventData;
     // Check for recording state changes
     if (xQueuePeek(recordingQueue, &recordingState, 0) == pdTRUE) {
       // If new command received
@@ -364,14 +388,14 @@ void SD_CARD(void *pvParameters) {
           // Close any existing file
           if (dataFile) {
             dataFile.close();
-          }
+          } 
           
           // Open new file
           dataFile = SD.open(recordingState.filename, FILE_WRITE);
           
           // Write headers
           if (dataFile) {
-            dataFile.println("timestamp,gps_valid,latitude,longitude,satellites,altitude,speed,accel_x,accel_y,accel_z,gyro_x,gyro_y,gyro_z,lidar_distance,lidar_strength");
+            dataFile.println("timestamp,gps_valid,latitude,longitude,satellites,altitude,speed,accel_x,accel_y,accel_z,gyro_x,gyro_y,gyro_z,lidar_distance,lidar_strength,event");
             dataFile.flush();
             Serial.println("New recording file created: " + String(recordingState.filename));
           } else {
@@ -389,7 +413,7 @@ void SD_CARD(void *pvParameters) {
     }
     
     // If recording, write data periodically
-    if (recordingState.isRecording && dataFile) {  // 10Hz recording
+    if (recordingState.isRecording && dataFile) {
       lastWrite = millis();
       
       // Get latest sensor data
@@ -401,7 +425,7 @@ void SD_CARD(void *pvParameters) {
       bool imuActive = xQueuePeek(imuQueue, &imuData, 0) == pdTRUE;
       bool lidarActive = xQueuePeek(lidarQueue, &lidarData, 0) == pdTRUE;
       
-      // Format CSV line using sprintf
+      // Format CSV line - timestamp only
       int dataLen = snprintf(dataLine, sizeof(dataLine), "%lu,", millis());
 
       // GPS data
@@ -431,14 +455,32 @@ void SD_CARD(void *pvParameters) {
         dataLen += snprintf(lidarDataStr, sizeof(lidarDataStr), "0,0");
       }
 
-      // Check if the formatted data fits into the buffer
+      // Add event data if available
+      char eventStr[16] = "";
+      int eventCode = 0;
+
+      // Check for unprocessed events
+      if (xQueuePeek(eventQueue, &eventData, 0) == pdTRUE && !eventData.processed) {
+        // Process event as before
+        strncpy(eventStr, eventData.eventType, sizeof(eventStr) - 1);
+        eventStr[sizeof(eventStr) - 1] = '\0';
+        eventCode = eventData.eventCode;
+        
+        // Mark as processed
+        eventData.processed = true;
+        xQueueOverwrite(eventQueue, &eventData);
+      }
+
+      // Concatenate sensor data first (in correct order)
       if (dataLen < sizeof(dataLine) - 1) {
-        // Concatenate the formatted strings
         strcat(dataLine, gpsDataStr);
         strcat(dataLine, imuDataStr);
         strcat(dataLine, lidarDataStr);
-
-        // Write data
+        
+        // NOW add event data at the end where it belongs
+        int eventPos = strlen(dataLine);
+        snprintf(dataLine + eventPos, sizeof(dataLine) - eventPos, ",%s,%d", eventStr, eventCode);
+        
         dataFile.println(dataLine);
       } else {
         Serial.println("Data line too long!");
@@ -463,83 +505,89 @@ void SD_CARD(void *pvParameters) {
 
 
 void LIDAR_TASK(void *pvParameters) {
-  // Initialize LIDAR sensor
-  DFRobot_LIDAR07_IIC lidar;
+  // Use the same approach as working code
+  static DFRobot_LIDAR07_IIC lidar;  // Make it static
   LidarData lidarData = {};
   
-  // Wait for I2C to be available
+  // Wait for I2C to be ready
   vTaskDelay(200 / portTICK_PERIOD_MS);
   
   if (xSemaphoreTake(i2cSemaphore, portMAX_DELAY) == pdTRUE) {
-    // Inicializa o sensor LIDAR com endereço I2C padrão 0x62
-    int i = 0;
-    while (!lidar.begin() && i < 5) {
-      Serial.println("Falha ao inicializar o LIDAR07! Tentativa " + String(i+1) + "/5");
-      i++;
+    // Use the same initialization pattern as working code
+    while(!lidar.begin()){
+      Serial.println("LIDAR07 initialization failed! Retrying...");
       vTaskDelay(1000 / portTICK_PERIOD_MS);
     }
-
-    if (i >= 5) {
-      Serial.println("Tentativas de inicialização do LIDAR07 esgotadas!");
-      xSemaphoreGive(i2cSemaphore);
-      lidarActive = false;
-      // Don't delete task, just mark as inactive
-      while(true) {
-        vTaskDelay(1000 / portTICK_PERIOD_MS); // Sleep forever
-      }
-    }
-
-    // Configuração para taxa máxima - velocidade I2C aumentada
-    Wire.setClock(400000); // Aumenta para 400kHz (máximo para I2C padrão)
-    lidar.setConMeasureFreq(10); // Configura a frequência de medição contínua para 2ms (500Hz)
-    // Configura o modo de medição contínua
-    lidar.setMeasureMode(DFRobot_LIDAR07::eLidar07Continuous);
+    
+    Serial.println("LIDAR07 initialized successfully!");
+    
+    uint32_t version = lidar.getVersion();
+    Serial.print("LIDAR VERSION: ");
+    Serial.print((version>>24)&0xFF,HEX);
+    Serial.print(".");Serial.print((version>>16)&0xFF,HEX);
+    Serial.print(".");Serial.print((version>>8)&0xFF,HEX);
+    Serial.print(".");Serial.println((version)&0xFF,HEX);
+    
+    // Follow the exact sequence from working code
+    while(!lidar.startFilter());
+    while(!lidar.setMeasureMode(lidar.eLidar07Continuous));
+    while(!lidar.setConMeasureFreq(100)); // 100ms = 10Hz
+    lidar.stopFilter(); // Stop filter to get raw data
     lidar.startMeasure();
-    lidar.startFilter(); // Ativa o filtro leve do sensor
-    Serial.println("LIDAR07 inicializado com sucesso em modo de alta velocidade");
+    
     xSemaphoreGive(i2cSemaphore);
+    lidarActive = true;
   }
   
-  // After initialization
-  Serial.print("LIDAR initialization status: ");
-  Serial.println(lidarActive ? "SUCCESS" : "FAILED");
-  
-  // Loop da task
+  // Task loop - use the same pattern as working code
   while (true) {
-    if (xSemaphoreTake(i2cSemaphore, 5 / portTICK_PERIOD_MS) == pdTRUE) {
-      // Lê os dados do LIDAR
-      if(lidar.getValue()){
-         uint16_t measurement = lidar.getDistanceMM();
-      uint16_t strength = lidar.getSignalAmplitude();
-      
-      // Liberamos o semáforo imediatamente após a leitura
-        xSemaphoreGive(i2cSemaphore);
+    if (xSemaphoreTake(i2cSemaphore, 10 / portTICK_PERIOD_MS) == pdTRUE) {
+      // Use getValue() check like in working code
+      if(lidar.getValue()) {
+        uint16_t distance = lidar.getDistanceMM();
+        uint16_t amplitude = lidar.getSignalAmplitude();
         
-        // Processamos os dados fora da seção crítica1
-        lidarData.distance = measurement / 10.0f;  // Converte mm para cm
-        lidarData.strength = strength;
-        lidarData.status = (measurement == 0) ? 2 : 
-                          (strength < 100) ? 1 : 0;
-        lidarData.timestamp = millis();
-        /*Serial.printf("LIDAR Distance: %.2f cm, Strength: %.2f, Status: %d\n", 
-                      lidarData.distance, lidarData.strength, lidarData.status);*/
-        // Atualiza a fila com os dados mais recentes
-        xQueueOverwrite(lidarQueue, &lidarData);
+        // Only process readings with good signal strength
+        if (amplitude > 80) {
+          lidarData.distance = distance / 10.0f; // Convert mm to cm
+          lidarData.strength = amplitude;
+          lidarData.status = 0; // Good reading
+          lidarData.timestamp = millis();
+          
+          xQueueOverwrite(lidarQueue, &lidarData);
+          
+         // Serial.print("LIDAR Distance: ");
+         // Serial.print(distance);
+         // Serial.println(" mm");
         }
-     
+      }
+      xSemaphoreGive(i2cSemaphore);
     }
     
-    // Menor intervalo possível entre leituras 
-    // Taxa de aproximadamente 100Hz (máximo prático do sensor)
-    vTaskDelay(10); // Praticamente sem delay, apenas cede o processador
-  }   
+    vTaskDelay(100 / portTICK_PERIOD_MS); // 10Hz
+  }
 }
+
+void scanI2C() {
+    Serial.println("Scanning I2C devices...");
+    Wire.begin();
+    
+    for (byte address = 1; address < 127; address++) {
+        Wire.beginTransmission(address);
+        if (Wire.endTransmission() == 0) {
+            Serial.print("I2C device found at address 0x");
+            if (address < 16) Serial.print("0");
+            Serial.println(address, HEX);
+        }
+    }
+    Serial.println("I2C scan complete");
+}
+
 
 void TCP_SERVER_TASK(void *pvParameters) {
   // Network configuration
   const char* ssid = "AP_ESP32";
   const char* password = "MCE_ROD_2025";
-  
   // Static IP Configuration
   IPAddress local_IP(192,168,20,55);
   IPAddress gateway(192,168,20,1);
@@ -548,7 +596,7 @@ void TCP_SERVER_TASK(void *pvParameters) {
   // TCP Server and Client
   WiFiServer server(1000);
   WiFiClient client;
-  
+  EventData eventData = {};
   // Local recording state initialization
   RecordingState recordingState = {false, false, 0, 0, ""};
   
@@ -568,6 +616,7 @@ void TCP_SERVER_TASK(void *pvParameters) {
   
   // Task loop
   while (true) {
+    volatile int event = 0;
     // Accept new client if needed
     if (!client || !client.connected()) {
       client = server.available();
@@ -599,6 +648,32 @@ void TCP_SERVER_TASK(void *pvParameters) {
         stateChanged = true;
         Serial.println("Recording stopped");
       }
+      else if (command == "buraco" || command == "lomba") {
+        // Create event record
+        strncpy(eventData.eventType, command.c_str(), sizeof(eventData.eventType) - 1);
+        eventData.eventType[sizeof(eventData.eventType) - 1] = '\0';
+        eventData.timestamp = millis();
+        eventData.processed = false;
+        
+        // Map event type to code
+        eventData.eventCode = (command == "buraco") ? 1 : 2;
+        
+        // Get current GPS coordinates
+        GpsData gpsData;
+        if (xQueuePeek(gpsQueue, &gpsData, 0) == pdTRUE) {
+          eventData.latitude = gpsData.latitude;
+          eventData.longitude = gpsData.longitude;
+        } else {
+          eventData.latitude = 0.0;
+          eventData.longitude = 0.0;
+        }
+        
+        // Send to queue
+        xQueueOverwrite(eventQueue, &eventData);
+        
+        // Acknowledge
+        event = 1;
+      }
       
       // Update queue if a state change occurred
       if (stateChanged) {
@@ -606,13 +681,21 @@ void TCP_SERVER_TASK(void *pvParameters) {
       }
       
       // Prepare acknowledgment JSON
-      StaticJsonDocument<200> jsonDoc;
+      StaticJsonDocument<512> jsonDoc;
       jsonDoc["status"] = recordingState.isRecording ? 1 : 0;
       jsonDoc["command"] = command;
       jsonDoc["result"] = stateChanged ? "success" : "no change";
       if (recordingState.isRecording) {
         jsonDoc["filename"] = recordingState.filename;
         jsonDoc["elapsed"] = (millis() - recordingState.startTime) / 1000;
+      }
+      if (event) {
+          jsonDoc["status"] = "event_recorded";
+          jsonDoc["event"] = eventData.eventType;
+          jsonDoc["event_code"] = eventData.eventCode;
+          jsonDoc["lat"] = eventData.latitude;
+          jsonDoc["lng"] = eventData.longitude;
+          event = 0;
       }
       
       String jsonString;
@@ -624,23 +707,57 @@ void TCP_SERVER_TASK(void *pvParameters) {
     if (millis() - lastStatusUpdate > 1000) {
       lastStatusUpdate = millis();
       
-      // Add these declarations
+      // Get sensor data
       ImuData imuData;
+      LidarData lidarData;
+      GpsData gpsData;
       bool imuActive = xQueuePeek(imuQueue, &imuData, 0) == pdTRUE;
+      bool lidarDataAvailable = xQueuePeek(lidarQueue, &lidarData, 0) == pdTRUE;
+      bool gpsDataAvailable = xQueuePeek(gpsQueue, &gpsData, 0) == pdTRUE;
       
-      // Now the rest of your code will work
-      client.println();
-      client.print("Recording: ");
-      client.println(recordingState.isRecording ? "ON" : "OFF");
-      client.print("File: ");
-      client.println(recordingState.filename);
-      if (imuActive) {
-        client.print("Accel X: ");
-        client.println(imuData.accelX, 4);
-        client.print("Accel Y: ");
-        client.println(imuData.accelY, 4);
-        client.print("Accel Z: ");
-        client.println(imuData.accelZ, 4);
+      if (client && client.connected()) {
+        client.println();
+        client.print("Recording: ");
+        client.println(recordingState.isRecording ? "ON" : "OFF");
+        client.print("File: ");
+        client.println(recordingState.filename);
+        
+        // IMU data
+        if (imuActive) {
+          client.print("Accel X: ");
+          client.println(imuData.accelX, 4);
+          client.print("Accel Y: ");
+          client.println(imuData.accelY, 4);
+          client.print("Accel Z: ");
+          client.println(imuData.accelZ, 4);
+        }
+        
+        // LIDAR data
+        if (lidarDataAvailable && lidarActive) {
+          client.print("LIDAR Distance: ");
+          client.print(lidarData.distance, 2);
+          client.println(" cm");
+          client.print("LIDAR Strength: ");
+          client.println(lidarData.strength);
+          client.print("LIDAR Status: ");
+          client.println(lidarData.status);
+        } else {
+          client.println("LIDAR: Not available");
+        }
+        
+        // GPS data
+        if (gpsDataAvailable && gpsData.isValid) {
+          client.print("GPS Lat: ");
+          client.println(gpsData.latitude, 6);
+          client.print("GPS Lng: ");
+          client.println(gpsData.longitude, 6);
+          client.print("GPS Satellites: ");
+          client.println(gpsData.satellites);
+        } else {
+          client.println("GPS: No fix");
+        }
+          
+        client.println("---");
       }
     }
     
@@ -648,6 +765,5 @@ void TCP_SERVER_TASK(void *pvParameters) {
     vTaskDelay(100 / portTICK_PERIOD_MS);
   }
 }
-
 
 
